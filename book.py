@@ -1,44 +1,93 @@
-import os
-from datetime import datetime, timedelta
 from flask import Flask, render_template_string, request, redirect, url_for, flash
-from pymongo import MongoClient
-from bson.objectid import ObjectId
+import sqlite3
+from datetime import datetime, timedelta
+import os
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'archive_library_secret_key')
+app.secret_key = "archive_library_secret_key"
 
-DEFAULT_MONGO_URI = "mongodb+srv://kaw25555665765_db_user:f5m5CpEhpJcMRuWR@booktest.9j6mgew.mongodb.net/booktest?retryWrites=true&w=majority"
+# กำหนดเส้นทางฐานข้อมูล SQLite ให้รองรับการทำงานบน Vercel Serverless (/tmp)
+if os.environ.get('VERCEL'):
+    DB_NAME = "/tmp/library_ruina.db"
+else:
+    DB_NAME = "library_ruina.db"
 
-def get_collections():
-    """สร้าง Connection แบบ Lazy Loading เพื่อป้องกัน Vercel Cold Start Crash"""
-    mongo_uri = os.environ.get('MONGO_URI', DEFAULT_MONGO_URI)
-    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
-    db = client['booktest']
-    return db['books'], db['members'], db['borrow_records']
+def get_db():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
-    """สร้างข้อมูลเริ่มต้นเมื่อคลังยังว่างเปล่า"""
-    try:
-        books_col, members_col, _ = get_collections()
-        if books_col.count_documents({}) == 0:
-            sample_books = [
-                {"code": "BK001", "title": "ระบบวิเคราะห์และออกแบบสารสนเทศ", "author": "ดร.สมชาย ใจดี", "category": "หมวดวิทยาการคอมพิวเตอร์", "isbn": "978-6160011221", "total_qty": 3, "available_qty": 2},
-                {"code": "BK002", "title": "การบริหารจัดการฐานข้อมูลขั้นสูง", "author": "ผศ.วิภาดา รักเรียน", "category": "หมวดเทคโนโลยีสารสนเทศ", "isbn": "978-6160011222", "total_qty": 2, "available_qty": 1},
-                {"code": "BK003", "title": "การพัฒนาเว็บแอปพลิเคชันด้วย Python", "author": "อาจารย์ประจำวิชา", "category": "หมวดวิศวกรรมซอฟต์แวร์", "isbn": "978-1305686113", "total_qty": 5, "available_qty": 5},
-                {"code": "BK004", "title": "เทคโนโลยีสารสนเทศเพื่อการจัดการ", "author": "รศ.นพดล สุขเสริฐ", "category": "หมวดบริหารธุรกิจ", "isbn": "978-6160011224", "total_qty": 4, "available_qty": 4}
-            ]
-            books_col.insert_many(sample_books)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            title TEXT NOT NULL,
+            author TEXT NOT NULL,
+            category TEXT NOT NULL,
+            isbn TEXT,
+            total_qty INTEGER DEFAULT 1,
+            available_qty INTEGER DEFAULT 1
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            phone TEXT,
+            email TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS borrow_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER,
+            member_id INTEGER,
+            borrow_date TEXT,
+            due_date TEXT,
+            return_date TEXT,
+            fine_amount REAL DEFAULT 0.0,
+            status TEXT DEFAULT 'BORROWED',
+            FOREIGN KEY(book_id) REFERENCES books(id),
+            FOREIGN KEY(member_id) REFERENCES members(id)
+        )
+    """)
+    
+    # เพิ่มข้อมูลตัวอย่างเริ่มต้นหากฐานข้อมูลว่างเปล่า
+    cursor.execute("SELECT COUNT(*) FROM books")
+    if cursor.fetchone()[0] == 0:
+        sample_books = [
+            ("BK001", "ระบบวิเคราะห์และออกแบบสารสนเทศ", "ดร.สมชาย ใจดี", "หมวดวิทยาการคอมพิวเตอร์", "978-6160011221", 3, 2),
+            ("BK002", "การบริหารจัดการฐานข้อมูลขั้นสูง", "ผศ.วิภาดา รักเรียน", "หมวดเทคโนโลยีสารสนเทศ", "978-6160011222", 2, 1),
+            ("BK003", "การพัฒนาเว็บแอปพลิเคชันด้วย Python", "อาจารย์ประจำวิชา", "หมวดวิศวกรรมซอฟต์แวร์", "978-1305686113", 5, 5),
+            ("BK004", "เทคโนโลยีสารสนเทศเพื่อการจัดการ", "รศ.นพดล สุขเสริฐ", "หมวดบริหารธุรกิจ", "978-6160011224", 4, 4)
+        ]
+        cursor.executemany("INSERT INTO books (code, title, author, category, isbn, total_qty, available_qty) VALUES (?,?,?,?,?,?,?)", sample_books)
 
-        if members_col.count_documents({}) == 0:
-            sample_members = [
-                {"code": "M68040264", "name": "ณัฏฐณิชา คณารัตน์", "role": "นักเรียน", "phone": "081-111-2222", "email": "natthanicha@buu.ac.th"},
-                {"code": "M68040267", "name": "ศักย์ศรณ์ แก่นจันทร์", "role": "นักเรียน", "phone": "082-222-3333", "email": "saksorn@buu.ac.th"},
-                {"code": "M68040456", "name": "ณัฐนนท์ พยมพฤกษ์", "role": "อาจารย์", "phone": "083-333-4444", "email": "nattanon@buu.ac.th"},
-                {"code": "M68040459", "name": "ธีรภัทร รัตนา", "role": "นักเรียน", "phone": "084-444-5555", "email": "theeraphat@buu.ac.th"}
-            ]
-            members_col.insert_many(sample_members)
-    except Exception as e:
-        print(f"Init DB Error: {e}")
+    cursor.execute("SELECT COUNT(*) FROM members")
+    if cursor.fetchone()[0] == 0:
+        sample_members = [
+            ("M68040264", "ณัฏฐณิชา คณารัตน์", "นักเรียน", "081-111-2222", "natthanicha@buu.ac.th"),
+            ("M68040267", "ศักย์ศรณ์ แก่นจันทร์", "นักเรียน", "082-222-3333", "saksorn@buu.ac.th"),
+            ("M68040456", "ณัฐนนท์ พยมพฤกษ์", "อาจารย์", "083-333-4444", "nattanon@buu.ac.th"),
+            ("M68040459", "ธีรภัทร รัตนา", "นักเรียน", "084-444-5555", "theeraphat@buu.ac.th")
+        ]
+        cursor.executemany("INSERT INTO members (code, name, role, phone, email) VALUES (?,?,?,?,?)", sample_members)
+
+    cursor.execute("SELECT COUNT(*) FROM borrow_records")
+    if cursor.fetchone()[0] == 0:
+        today = datetime.now()
+        p_borrow = (today - timedelta(days=10)).strftime("%Y-%m-%d")
+        p_due = (today - timedelta(days=3)).strftime("%Y-%m-%d")
+        cursor.execute("INSERT INTO borrow_records (book_id, member_id, borrow_date, due_date, status) VALUES (1, 1, ?, ?, 'BORROWED')", (p_borrow, p_due))
+        cursor.execute("INSERT INTO borrow_records (book_id, member_id, borrow_date, due_date, status) VALUES (2, 2, ?, ?, 'BORROWED')", (p_borrow, p_due))
+
+    conn.commit()
+    conn.close()
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -79,6 +128,7 @@ HTML_TEMPLATE = """
             overflow-x: hidden;
         }
 
+        /* High Visibility Background Wallpaper */
         body::before {
             content: '';
             position: fixed;
@@ -94,6 +144,7 @@ HTML_TEMPLATE = """
             pointer-events: none;
         }
 
+        /* Welcome Invitation Splash Overlay */
         #welcome-splash {
             position: fixed;
             top: 0; left: 0;
@@ -211,6 +262,7 @@ HTML_TEMPLATE = """
             position: relative;
         }
 
+        /* Transparent Glass Sidebar */
         aside.sidebar {
             width: var(--sidebar-width);
             background: rgba(5, 5, 10, 0.25);
@@ -284,6 +336,7 @@ HTML_TEMPLATE = """
             text-shadow: 0 2px 6px rgba(0,0,0,0.9);
         }
 
+        /* Skewed Transparent Menu Items */
         .sidebar-menu a {
             position: relative;
             color: var(--text-main);
@@ -329,6 +382,7 @@ HTML_TEMPLATE = """
             color: #060609;
         }
 
+        /* Main Top Header & Content Area */
         main.main-content {
             margin-left: var(--sidebar-width);
             flex: 1;
@@ -383,6 +437,7 @@ HTML_TEMPLATE = """
             max-width: 1450px;
         }
 
+        /* Sheer Transparent Stats Cards */
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
@@ -439,6 +494,7 @@ HTML_TEMPLATE = """
             text-shadow: 0 3px 10px rgba(0,0,0,0.95);
         }
 
+        /* Sheer Glass Panels & Tables */
         .panel {
             background: var(--panel-glass);
             backdrop-filter: blur(3px);
@@ -522,6 +578,7 @@ HTML_TEMPLATE = """
             border: 1px solid rgba(46, 204, 113, 0.6);
         }
 
+        /* Forms & Buttons */
         .form-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -622,6 +679,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
 
+    <!-- Welcome Splash Invitation -->
     <div id="welcome-splash">
         <div class="invitation-card">
             <div class="invitation-badge">
@@ -1045,44 +1103,39 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# ---------------------------------------------------------
-# ROUTES & CONTROLLERS
-# ---------------------------------------------------------
-
 @app.route('/')
 def dashboard():
-    init_db()
-    try:
-        books_col, members_col, borrows_col = get_collections()
-        
-        pipeline = [{"$group": {"_id": None, "total": {"$sum": "$total_qty"}}}]
-        res = list(books_col.aggregate(pipeline))
-        total_books = res[0]['total'] if res else 0
-
-        total_members = members_col.count_documents({})
-        active_borrows = borrows_col.count_documents({"status": "BORROWED"})
-        
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        overdue_count = borrows_col.count_documents({"status": "BORROWED", "due_date": {"$lt": today_str}})
-
-        active_records = list(borrows_col.find({"status": "BORROWED"}).sort("due_date", 1))
-        borrow_list = []
-        for r in active_records:
-            bk = books_col.find_one({"_id": ObjectId(r['book_id'])}) if isinstance(r['book_id'], (ObjectId, str)) else None
-            mb = members_col.find_one({"_id": ObjectId(r['member_id'])}) if isinstance(r['member_id'], (ObjectId, str)) else None
-            borrow_list.append({
-                'id': str(r['_id']),
-                'book_title': bk['title'] if bk else 'ไม่พบข้อมูล',
-                'member_name': mb['name'] if mb else 'ไม่พบข้อมูล',
-                'borrow_date': r['borrow_date'],
-                'due_date': r['due_date'],
-                'is_overdue': r['due_date'] < today_str
-            })
-    except Exception as e:
-        total_books, total_members, active_borrows, overdue_count = 0, 0, 0, 0
-        borrow_list = []
-        flash(f"เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล: {str(e)}")
-
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT SUM(total_qty) FROM books")
+    total_books = c.fetchone()[0] or 0
+    c.execute("SELECT COUNT(*) FROM members")
+    total_members = c.fetchone()[0] or 0
+    c.execute("SELECT COUNT(*) FROM borrow_records WHERE status='BORROWED'")
+    active_borrows = c.fetchone()[0] or 0
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    c.execute("SELECT COUNT(*) FROM borrow_records WHERE status='BORROWED' AND due_date < ?", (today_str,))
+    overdue_count = c.fetchone()[0] or 0
+    c.execute("""
+        SELECT r.id, b.title as book_title, m.name as member_name, r.borrow_date, r.due_date
+        FROM borrow_records r
+        JOIN books b ON r.book_id = b.id
+        JOIN members m ON r.member_id = m.id
+        WHERE r.status = 'BORROWED'
+        ORDER BY r.due_date ASC
+    """)
+    rows = c.fetchall()
+    borrow_list = []
+    for r in rows:
+        borrow_list.append({
+            'id': r['id'],
+            'book_title': r['book_title'],
+            'member_name': r['member_name'],
+            'borrow_date': r['borrow_date'],
+            'due_date': r['due_date'],
+            'is_overdue': r['due_date'] < today_str
+        })
+    conn.close()
     return render_template_string(HTML_TEMPLATE, page='dashboard', 
                                   total_books=total_books, total_members=total_members,
                                   active_borrows=active_borrows, overdue_count=overdue_count,
@@ -1090,32 +1143,17 @@ def dashboard():
 
 @app.route('/books')
 def books():
-    init_db()
     q = request.args.get('q', '').strip()
-    try:
-        books_col, _, _ = get_collections()
-        if q:
-            query = {
-                "$or": [
-                    {"title": {"$regex": q, "$options": "i"}},
-                    {"author": {"$regex": q, "$options": "i"}},
-                    {"category": {"$regex": q, "$options": "i"}},
-                    {"code": {"$regex": q, "$options": "i"}}
-                ]
-            }
-            books_cursor = books_col.find(query)
-        else:
-            books_cursor = books_col.find().sort("_id", -1)
-
-        books_list = []
-        for b in books_cursor:
-            b['id'] = str(b['_id'])
-            books_list.append(b)
-    except Exception as e:
-        books_list = []
-        flash(f"ดึงข้อมูลหนังสือไม่สำเร็จ: {str(e)}")
-
-    return render_template_string(HTML_TEMPLATE, page='books', books=books_list, search_q=q)
+    conn = get_db()
+    c = conn.cursor()
+    if q:
+        kw = f"%{q}%"
+        c.execute("SELECT * FROM books WHERE title LIKE ? OR author LIKE ? OR category LIKE ? OR code LIKE ?", (kw, kw, kw, kw))
+    else:
+        c.execute("SELECT * FROM books ORDER BY id DESC")
+    books = c.fetchall()
+    conn.close()
+    return render_template_string(HTML_TEMPLATE, page='books', books=books, search_q=q)
 
 @app.route('/add_book', methods=['POST'])
 def add_book():
@@ -1126,50 +1164,37 @@ def add_book():
     isbn = request.form.get('isbn', '').strip()
     qty = int(request.form.get('qty', 1))
 
+    conn = get_db()
+    c = conn.cursor()
     try:
-        books_col, _, _ = get_collections()
-        if books_col.find_one({"code": code}):
-            flash("เกิดข้อผิดพลาด: รหัสหนังสือซ้ำในระบบ!")
-        else:
-            books_col.insert_one({
-                "code": code,
-                "title": title,
-                "author": author,
-                "category": category,
-                "isbn": isbn,
-                "total_qty": qty,
-                "available_qty": qty
-            })
-            flash(f"บันทึกหนังสือ '{title}' เรียบร้อยแล้ว")
-    except Exception as e:
-        flash(f"เพิ่มหนังสือไม่สำเร็จ: {str(e)}")
-
+        c.execute("INSERT INTO books (code, title, author, category, isbn, total_qty, available_qty) VALUES (?,?,?,?,?,?,?)",
+                  (code, title, author, category, isbn, qty, qty))
+        conn.commit()
+        flash(f"บันทึกหนังสือ '{title}' เรียบร้อยแล้ว")
+    except sqlite3.IntegrityError:
+        flash("เกิดข้อผิดพลาด: รหัสหนังสือซ้ำในระบบ!")
+    finally:
+        conn.close()
     return redirect(url_for('books'))
 
-@app.route('/delete_book/<book_id>')
+@app.route('/delete_book/<int:book_id>')
 def delete_book(book_id):
-    try:
-        books_col, _, _ = get_collections()
-        books_col.delete_one({"_id": ObjectId(book_id)})
-        flash("ลบหนังสือออกจากระบบแล้ว")
-    except Exception as e:
-        flash(f"เกิดข้อผิดพลาดในการลบ: {str(e)}")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM books WHERE id=?", (book_id,))
+    conn.commit()
+    conn.close()
+    flash("ลบหนังสือออกจากระบบแล้ว")
     return redirect(url_for('books'))
 
 @app.route('/members')
 def members():
-    init_db()
-    try:
-        _, members_col, _ = get_collections()
-        members_cursor = members_col.find().sort("_id", -1)
-        members_list = []
-        for m in members_cursor:
-            m['id'] = str(m['_id'])
-            members_list.append(m)
-    except Exception as e:
-        members_list = []
-        flash(f"ดึงข้อมูลสมาชิกไม่สำเร็จ: {str(e)}")
-    return render_template_string(HTML_TEMPLATE, page='members', members=members_list)
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM members ORDER BY id DESC")
+    members = c.fetchall()
+    conn.close()
+    return render_template_string(HTML_TEMPLATE, page='members', members=members)
 
 @app.route('/add_member', methods=['POST'])
 def add_member():
@@ -1179,162 +1204,124 @@ def add_member():
     phone = request.form.get('phone', '').strip()
     email = request.form.get('email', '').strip()
 
+    conn = get_db()
+    c = conn.cursor()
     try:
-        _, members_col, _ = get_collections()
-        if members_col.find_one({"code": code}):
-            flash("เกิดข้อผิดพลาด: รหัสสมาชิกซ้ำในระบบ!")
-        else:
-            members_col.insert_one({
-                "code": code,
-                "name": name,
-                "role": role,
-                "phone": phone,
-                "email": email
-            })
-            flash(f"เพิ่มสมาชิก '{name}' เรียบร้อยแล้ว")
-    except Exception as e:
-        flash(f"เพิ่มสมาชิกไม่สำเร็จ: {str(e)}")
-
+        c.execute("INSERT INTO members (code, name, role, phone, email) VALUES (?,?,?,?,?)", (code, name, role, phone, email))
+        conn.commit()
+        flash(f"เพิ่มสมาชิก '{name}' เรียบร้อยแล้ว")
+    except sqlite3.IntegrityError:
+        flash("เกิดข้อผิดพลาด: รหัสสมาชิกซ้ำในระบบ!")
+    finally:
+        conn.close()
     return redirect(url_for('members'))
 
-@app.route('/delete_member/<member_id>')
+@app.route('/delete_member/<int:member_id>')
 def delete_member(member_id):
-    try:
-        _, members_col, _ = get_collections()
-        members_col.delete_one({"_id": ObjectId(member_id)})
-        flash("ลบสมาชิกออกจากระบบแล้ว")
-    except Exception as e:
-        flash(f"เกิดข้อผิดพลาดในการลบ: {str(e)}")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM members WHERE id=?", (member_id,))
+    conn.commit()
+    conn.close()
+    flash("ลบสมาชิกออกจากระบบแล้ว")
     return redirect(url_for('members'))
 
 @app.route('/circulation')
 def circulation():
-    init_db()
-    try:
-        books_col, members_col, borrows_col = get_collections()
-        
-        members_cursor = members_col.find()
-        members_list = []
-        for m in members_cursor:
-            m['id'] = str(m['_id'])
-            members_list.append(m)
-
-        available_books_cursor = books_col.find({"available_qty": {"$gt": 0}})
-        available_books = []
-        for b in available_books_cursor:
-            b['id'] = str(b['_id'])
-            available_books.append(b)
-
-        active_records_cursor = borrows_col.find({"status": "BORROWED"})
-        active_records = []
-        for r in active_records_cursor:
-            bk = books_col.find_one({"_id": ObjectId(r['book_id'])}) if isinstance(r['book_id'], (ObjectId, str)) else None
-            mb = members_col.find_one({"_id": ObjectId(r['member_id'])}) if isinstance(r['member_id'], (ObjectId, str)) else None
-            active_records.append({
-                'id': str(r['_id']),
-                'book_title': bk['title'] if bk else 'ไม่พบข้อมูล',
-                'member_name': mb['name'] if mb else 'ไม่พบข้อมูล',
-                'due_date': r['due_date']
-            })
-    except Exception as e:
-        members_list, available_books, active_records = [], [], []
-        flash(f"ดึงข้อมูลงานยืม-คืนไม่สำเร็จ: {str(e)}")
-
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM members")
+    members = c.fetchall()
+    c.execute("SELECT * FROM books WHERE available_qty > 0")
+    available_books = c.fetchall()
+    c.execute("""
+        SELECT r.id, b.title as book_title, m.name as member_name, r.due_date
+        FROM borrow_records r
+        JOIN books b ON r.book_id = b.id
+        JOIN members m ON r.member_id = m.id
+        WHERE r.status = 'BORROWED'
+    """)
+    active_records = c.fetchall()
+    conn.close()
     return render_template_string(HTML_TEMPLATE, page='circulation', 
-                                  members=members_list, available_books=available_books, active_records=active_records)
+                                  members=members, available_books=available_books, active_records=active_records)
 
 @app.route('/borrow', methods=['POST'])
 def borrow_book():
-    member_id = request.form['member_id']
-    book_id = request.form['book_id']
+    member_id = int(request.form['member_id'])
+    book_id = int(request.form['book_id'])
     days = int(request.form.get('days', 7))
 
     b_date = datetime.now()
     d_date = b_date + timedelta(days=days)
 
-    try:
-        books_col, _, borrows_col = get_collections()
-        borrows_col.insert_one({
-            "book_id": ObjectId(book_id),
-            "member_id": ObjectId(member_id),
-            "borrow_date": b_date.strftime("%Y-%m-%d"),
-            "due_date": d_date.strftime("%Y-%m-%d"),
-            "return_date": None,
-            "fine_amount": 0.0,
-            "status": "BORROWED"
-        })
-
-        books_col.update_one({"_id": ObjectId(book_id)}, {"$inc": {"available_qty": -1}})
-        flash(f"ยืมหนังสือสำเร็จ! กำหนดคืนวันที่ {d_date.strftime('%Y-%m-%d')}")
-    except Exception as e:
-        flash(f"ทำรายการยืมไม่สำเร็จ: {str(e)}")
-
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("INSERT INTO borrow_records (book_id, member_id, borrow_date, due_date, status) VALUES (?,?,?,?,'BORROWED')",
+              (book_id, member_id, b_date.strftime("%Y-%m-%d"), d_date.strftime("%Y-%m-%d")))
+    c.execute("UPDATE books SET available_qty = available_qty - 1 WHERE id=?", (book_id,))
+    conn.commit()
+    conn.close()
+    flash(f"ยืมหนังสือสำเร็จ! กำหนดคืนวันที่ {d_date.strftime('%Y-%m-%d')}")
     return redirect(url_for('circulation'))
 
 @app.route('/return', methods=['POST'])
 def return_book():
-    record_id = request.form['record_id']
-    try:
-        books_col, _, borrows_col = get_collections()
-        rec = borrows_col.find_one({"_id": ObjectId(record_id)})
-
-        if rec:
-            book_id = rec['book_id']
-            due_date_str = rec['due_date']
-            today = datetime.now()
-            due_dt = datetime.strptime(due_date_str, "%Y-%m-%d")
-            overdue_days = (today - due_dt).days
-            fine = overdue_days * 5.0 if overdue_days > 0 else 0.0
-
-            borrows_col.update_one(
-                {"_id": ObjectId(record_id)},
-                {"$set": {
-                    "return_date": today.strftime("%Y-%m-%d"),
-                    "fine_amount": fine,
-                    "status": "RETURNED"
-                }}
-            )
-
-            books_col.update_one({"_id": ObjectId(book_id)}, {"$inc": {"available_qty": 1}})
-            flash(f"รับคืนหนังสือเรียบร้อยแล้ว! (ค่าปรับ: {fine:.2f} บาท)")
-        else:
-            flash("ไม่พบข้อมูลรายการยืม")
-    except Exception as e:
-        flash(f"ทำรายการคืนไม่สำเร็จ: {str(e)}")
-
+    record_id = int(request.form['record_id'])
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT book_id, due_date FROM borrow_records WHERE id=?", (record_id,))
+    rec = c.fetchone()
+    book_id = rec['book_id']
+    due_date_str = rec['due_date']
+    today = datetime.now()
+    due_dt = datetime.strptime(due_date_str, "%Y-%m-%d")
+    overdue_days = (today - due_dt).days
+    fine = overdue_days * 5.0 if overdue_days > 0 else 0.0
+    c.execute("UPDATE borrow_records SET return_date=?, fine_amount=?, status='RETURNED' WHERE id=?",
+              (today.strftime("%Y-%m-%d"), fine, record_id))
+    c.execute("UPDATE books SET available_qty = available_qty + 1 WHERE id=?", (book_id,))
+    conn.commit()
+    conn.close()
+    flash(f"รับคืนหนังสือเรียบร้อยแล้ว! (ค่าปรับ: {fine:.2f} บาท)")
     return redirect(url_for('circulation'))
 
 @app.route('/reports')
 def reports():
-    init_db()
+    conn = get_db()
+    c = conn.cursor()
     today_str = datetime.now().strftime("%Y-%m-%d")
-    try:
-        books_col, members_col, borrows_col = get_collections()
-        rows = list(borrows_col.find().sort("_id", -1))
-        records = []
-        for r in rows:
-            bk = books_col.find_one({"_id": ObjectId(r['book_id'])}) if isinstance(r['book_id'], (ObjectId, str)) else None
-            mb = members_col.find_one({"_id": ObjectId(r['member_id'])}) if isinstance(r['member_id'], (ObjectId, str)) else None
-            records.append({
-                'id': str(r['_id']),
-                'book_title': bk['title'] if bk else 'ไม่พบข้อมูล',
-                'member_name': mb['name'] if mb else 'ไม่พบข้อมูล',
-                'borrow_date': r['borrow_date'],
-                'due_date': r['due_date'],
-                'return_date': r['return_date'],
-                'fine_amount': r['fine_amount'],
-                'status': r['status'],
-                'is_overdue': r['status'] == 'BORROWED' and r['due_date'] < today_str
-            })
-    except Exception as e:
-        records = []
-        flash(f"ดึงรายงานไม่สำเร็จ: {str(e)}")
-
+    c.execute("""
+        SELECT r.id, b.title as book_title, m.name as member_name, r.borrow_date, r.due_date, r.return_date, r.fine_amount, r.status
+        FROM borrow_records r
+        JOIN books b ON r.book_id = b.id
+        JOIN members m ON r.member_id = m.id
+        ORDER BY r.id DESC
+    """)
+    rows = c.fetchall()
+    records = []
+    for r in rows:
+        records.append({
+            'id': r['id'],
+            'book_title': r['book_title'],
+            'member_name': r['member_name'],
+            'borrow_date': r['borrow_date'],
+            'due_date': r['due_date'],
+            'return_date': r['return_date'],
+            'fine_amount': r['fine_amount'],
+            'status': r['status'],
+            'is_overdue': r['status'] == 'BORROWED' and r['due_date'] < today_str
+        })
+    conn.close()
     return render_template_string(HTML_TEMPLATE, page='reports', records=records)
 
 @app.route('/creators')
 def creators():
     return render_template_string(HTML_TEMPLATE, page='creators')
+
+# บังคับรันสร้างฐานข้อมูลทันทีเมื่อระบบเริ่มทำงาน (แก้ปัญหา Vercel 500)
+with app.app_context():
+    init_db()
 
 if __name__ == '__main__':
     print("Web Server is running at http://127.0.0.1:5000")
