@@ -1,0 +1,10 @@
+[project]
+name = "library-system"
+version = "0.1.0"
+dependencies = [
+    "Flask",
+    "psycopg2-binary"
+]
+
+[tool.vercel]
+entrypoint = "book:app"
